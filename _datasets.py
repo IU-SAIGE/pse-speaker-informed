@@ -186,9 +186,11 @@ musan = create_df_musan('/media/sdc1/musan_8khz/')
 
 speakers_vl = pd.read_csv('speakers/validation.csv', dtype=_df_types)
 speakers_te = pd.read_csv('speakers/test.csv', dtype=_df_types)
-speaker_ids_vl = set(speakers_vl.speaker_id)
-speaker_ids_te = set(speakers_te.speaker_id)
-speaker_ids_tr = set(librispeech.speaker_id) - speaker_ids_vl - speaker_ids_te
-speaker_ids_vl = sorted(speaker_ids_vl)
-speaker_ids_te = sorted(speaker_ids_te)
-speaker_ids_tr = sorted(speaker_ids_tr)
+speakers_tr = pd.read_csv('speakers/train.csv', dtype=_df_types)
+speaker_ids_vl = sorted(speakers_vl.speaker_id)
+speaker_ids_te = sorted(speakers_te.speaker_id)
+speaker_ids_tr = sorted(speakers_tr.speaker_id)
+# speaker_ids_tr = set(librispeech.speaker_id) - speaker_ids_vl - speaker_ids_te
+# speaker_ids_vl = sorted(speaker_ids_vl)
+# speaker_ids_te = sorted(speaker_ids_te)
+# speaker_ids_tr = sorted(speaker_ids_tr)
