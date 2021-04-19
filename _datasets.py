@@ -40,14 +40,12 @@ def create_df_librispeech(
             & (df.duration > max_duration)]
     df.loc[:, 'max_offset'] = (df.duration - max_duration) * sample_rate
     df.loc[:, 'max_offset'] = df['max_offset'].astype(int)
-    df.loc[:, 'split'] = 'pretrain'
+    df.loc[:, 'split'] = 'train'
     for speaker_id in df.speaker_id.unique():
         _mask = (df['speaker_id'] == speaker_id)
         _last_row = _mask[::-1].idxmax()
-        df.loc[_last_row-25:_last_row-20, 'split'] = 'preval'
-        df.loc[_last_row-20:_last_row-10, 'split'] = 'train'
-        df.loc[_last_row-10:_last_row-5, 'split'] = 'val'
-        df.loc[_last_row-5:_last_row, 'split'] = 'test'
+        df.loc[_last_row-20:_last_row-10, 'split'] = 'val'
+        df.loc[_last_row-10:_last_row, 'split'] = 'test'
     df.loc[:, 'filepath'] = (
         root_directory + '/' + df.set_id + '/' + df.speaker_id + '/'
         + df.chapter_id + '/' + df.speaker_id + '-' + df.chapter_id
@@ -81,14 +79,15 @@ def create_df_musan(
     return df
 
 
-class MyDataset(torch.utils.data.IterableDataset):
+class DatasetSV(torch.utils.data.IterableDataset):
 
     def __init__(
             self,
             speaker_ids: List[str],
-            noise_subset: str = 'free-sound',
+            speech_subset: str = 'train',
+            noise_subset: str = 'train',
             utterance_duration: Optional[int] = 3,
-            mixture_snr: Union[float, Tuple[float, float]] = (-5, 5)
+            mixture_snr: Union[float, Tuple[float, float]] = (-5, 10)
     ):
         super().__init__()
         self.rng = np.random.default_rng(0)
@@ -98,8 +97,9 @@ class MyDataset(torch.utils.data.IterableDataset):
             self.mixture_snr_max = max(mixture_snr)
         else:
             self.mixture_snr_min = self.mixture_snr_max = mixture_snr
-        self.df_s = librispeech.query(f'speaker_id in {speaker_ids}')
-        self.df_n = musan.query(f'set_id == "{noise_subset}"')
+        self.df_s = librispeech.query(f'speaker_id in {speaker_ids}'
+        	).query(f'split == {speech_subset}')
+        self.df_n = musan.query(f'split == "{noise_subset}"')
         self.utterance_duration = utterance_duration
 
     def __iter__(self):
@@ -176,6 +176,68 @@ class MyDataset(torch.utils.data.IterableDataset):
             torch.Tensor(x_1) / scale_factor,
             torch.Tensor(x_2) / scale_factor,
             torch.Tensor([1. if is_same_speaker else 0.]),
+        )
+
+        return sample
+
+
+class DatasetSE(torch.utils.data.IterableDataset):
+
+    def __init__(
+            self,
+            speaker_ids: List[str],
+            speech_subset: str = 'train',
+            noise_subset: str = 'train',
+            utterance_duration: Optional[int] = 3,
+            mixture_snr: Union[float, Tuple[float, float]] = (-5, 10)
+    ):
+        super().__init__()
+        self.rng = np.random.default_rng(0)
+        (self.s_idx, self.n_idx) = (-1, -1)
+        self.speaker_ids = speaker_ids
+        if isinstance(mixture_snr, Tuple):
+            self.mixture_snr_min = min(mixture_snr)
+            self.mixture_snr_max = max(mixture_snr)
+        else:
+            self.mixture_snr_min = self.mixture_snr_max = mixture_snr
+        self.df_s = librispeech.query(f'speaker_id in {speaker_ids}'
+        	).query(f'split == "{speech_subset}"')
+        self.df_n = musan.query(f'split == "{noise_subset}"')
+        self.utterance_duration = utterance_duration
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+
+        # increment pointers
+        self.s_idx = (self.s_idx + 1) % len(self.df_s)
+        self.n_idx = (self.n_idx + 1) % len(self.df_n)
+
+        length = self.utterance_duration * sample_rate
+        offset_s = self.rng.integers(0, self.df_s.max_offset.iloc[self.s_idx])
+        offset_n = self.rng.integers(0, self.df_n.max_offset.iloc[self.n_idx])
+
+        # read speech file, offset and truncate, then normalize
+        (_, s) = wavfile.read(self.df_s.filepath.iloc[self.s_idx])
+        s = s[offset_s:offset_s+length]
+        s = s / s.std()
+
+        # read noise file, offset and truncate, then normalize
+        (_, n) = wavfile.read(self.df_n.filepath.iloc[self.n_idx])
+        n = n[offset_n:offset_n+length]
+        n = n / n.std()
+
+        # mix the signals
+        snr = self.rng.uniform(self.mixture_snr_min, self.mixture_snr_max)
+        x = s + (n * 10**(-snr/20.))
+
+        # create output tuple
+        scale_factor = abs(x).max()
+        sample = (
+            torch.Tensor(x) / scale_factor,
+            torch.Tensor(s) / scale_factor,
+            torch.Tensor(n) / scale_factor,
         )
 
         return sample

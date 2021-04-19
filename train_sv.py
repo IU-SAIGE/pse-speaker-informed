@@ -35,10 +35,20 @@ def ray_train_sv(config, use_ray: bool = True):
     optimizer = torch.optim.Adam(network.parameters(), lr=config['learning_rate'])
     criterion = torch.nn.BCEWithLogitsLoss(size_average=True)
 
-    data_tr = D.MyDataset(D.speaker_ids_tr, 'free-sound', config['utterance_duration'], config['mixing_snr'])
+    data_tr = D.DatasetSV(
+        speaker_ids=D.speaker_ids_tr,
+        speech_subset='train',
+        noise_subset='train',
+        utterance_duration=config['utterance_duration'],
+        mixture_snr=config['mixing_snr'])
     dl_tr = DataLoader(data_tr, batch_size=config['batch_size'])
 
-    data_vl = D.MyDataset(D.speaker_ids_vl, 'free-sound', config['utterance_duration'], config['mixing_snr'])
+    data_vl = D.DatasetSV(
+        speaker_ids=D.speaker_ids_vl,
+        speech_subset='train',
+        noise_subset='train',
+        utterance_duration=config['utterance_duration'],
+        mixture_snr=config['mixing_snr'])
     (vx_1, vx_2, vy) = next(iter(DataLoader(data_vl, batch_size=config['batch_size'])))
     vx_1 = vx_1.to(device)
     vx_2 = vx_2.to(device)
