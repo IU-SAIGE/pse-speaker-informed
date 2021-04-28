@@ -127,9 +127,9 @@ def ray_train_sv(config, use_ray: bool = True):
 def main(num_gpus: float = .25):
     config = {
         'mixing_snr': (-5, 10),
-        'utterance_duration': tune.grid_search([5, 3, 1]),
-        'hidden_size': tune.grid_search([32, 64, 96]),
-        'learning_rate': 1e-3, # tune.grid_search([1e-2, 1e-3, 1e-4]),
+        'utterance_duration': 5,
+        'hidden_size': 32,
+        'learning_rate': tune.qloguniform(1e-2,1e-5,1e-6),
         'num_layers': 2,
         'batch_size': 128,
     }
@@ -144,15 +144,17 @@ def main(num_gpus: float = .25):
     result = tune.run(
         ray_train_sv,
         config=config,
+        name='ray_train_sv_find_lr',
         keep_checkpoints_num=1,
         log_to_file='log.txt',
         progress_reporter=CLIReporter(
-            max_report_frequency=10,
+            max_report_frequency=50,
             metric_columns=['num_batches', 'vl_loss', 'vl_acc'],
-            parameter_columns=['hidden_size', 'utterance_duration', 'learning_rate'],
+            parameter_columns=['learning_rate'],
         ),
-        resources_per_trial={'gpu': num_gpus},
+        num_samples=20,
         scheduler=scheduler,
+        resources_per_trial={'gpu': num_gpus},
         verbose=1
     )
     best_trial = result.get_best_trial(
@@ -162,8 +164,10 @@ def main(num_gpus: float = .25):
     )
     print('Best trial config: {}'.format(
         best_trial.config))
-    print('Best trial final validation loss: {}'.format(
-        best_trial.last_result['vl_loss']))
+    print('Best trial final test results: {}'.format(
+        best_trial.last_result['vl_acc']))
+    print('Best trial checkpoint path: {}'.format(
+        os.path.join(best_trial.checkpoint.value, "checkpoint")))
 
 
 if __name__ == '__main__':

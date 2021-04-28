@@ -98,7 +98,7 @@ class DatasetSV(torch.utils.data.IterableDataset):
         else:
             self.mixture_snr_min = self.mixture_snr_max = mixture_snr
         self.df_s = librispeech.query(f'speaker_id in {speaker_ids}'
-        	).query(f'split == {speech_subset}')
+        	).query(f'split == "{speech_subset}"')
         self.df_n = musan.query(f'split == "{noise_subset}"')
         self.utterance_duration = utterance_duration
 
