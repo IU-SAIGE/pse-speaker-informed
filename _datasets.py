@@ -14,21 +14,24 @@ from ray.tune.schedulers import ASHAScheduler
 from ray.tune import CLIReporter
 
 
-EPS = 1e-8
-
 _df_types = dict(
     channel=str, chapter_id=str, clip_id=str, data_type=str, duration=float,
     is_sparse=bool, set_id=str, speaker_id=str, utterance_id=str,
     freesound_id=str,
 )
 
-max_duration: int = 5  # seconds
-sample_rate: int = 8000  # Hz
+EPS = 1e-8
+
+DEFAULT_UTTERANCE_DURATION: int = 5  # seconds
+DEFAULT_MIXTURE_SNRS: Union[float, Tuple[float, float]] = (-5, 10) # dB
+DEFAULT_SAMPLE_RATE: int = 8000  # Hz
 
 
 def create_df_librispeech(
     root_directory: str,
-    csv_path: str = 'corpora/librispeech.csv'
+    csv_path: str = 'corpora/librispeech.csv',
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
+    max_duration: int = DEFAULT_UTTERANCE_DURATION,
 ):
     """Creates a Pandas DataFrame with files from the LibriSpeech corpus.
     Root directory should mimic archive-extracted folder structure.
@@ -51,13 +54,15 @@ def create_df_librispeech(
         + df.chapter_id + '/' + df.speaker_id + '-' + df.chapter_id
         + '-' + df.utterance_id + '.wav'
     )
-    # assert all(df.filepath.apply(os.path.isfile))
+    assert all(df.filepath.apply(os.path.isfile))
     return df
 
 
 def create_df_musan(
     root_directory: str,
-    csv_path: str = 'corpora/musan.csv'
+    csv_path: str = 'corpora/musan.csv',
+    sample_rate: int = DEFAULT_SAMPLE_RATE,
+    max_duration: int = DEFAULT_UTTERANCE_DURATION,
 ):
     """Creates a Pandas DataFrame with files from the MUSAN corpus.
     Root directory should mimic archive-extracted folder structure.
@@ -75,7 +80,7 @@ def create_df_musan(
     )
     df.loc[:, 'split'] = df.set_id
     df.split = df.split.replace({'free-sound': 'train', 'sound-bible': 'test'})
-    # assert all(df.filepath.apply(os.path.isfile))
+    assert all(df.filepath.apply(os.path.isfile))
     return df
 
 
@@ -86,8 +91,9 @@ class DatasetSV(torch.utils.data.IterableDataset):
             speaker_ids: List[str],
             speech_subset: str = 'train',
             noise_subset: str = 'train',
-            utterance_duration: Optional[int] = 3,
-            mixture_snr: Union[float, Tuple[float, float]] = (-5, 10)
+            mixture_snr: Union[float, Tuple[float, float]] = DEFAULT_MIXTURE_SNRS,
+            sample_rate: int = DEFAULT_SAMPLE_RATE,
+            utterance_duration: int = DEFAULT_UTTERANCE_DURATION,
     ):
         super().__init__()
         self.rng = np.random.default_rng(0)
@@ -100,14 +106,14 @@ class DatasetSV(torch.utils.data.IterableDataset):
         self.df_s = librispeech.query(f'speaker_id in {speaker_ids}'
         	).query(f'split == "{speech_subset}"')
         self.df_n = musan.query(f'split == "{noise_subset}"')
-        self.utterance_duration = utterance_duration
+
+        self.num_samples = int(sample_rate * utterance_duration)
 
     def __iter__(self):
         return self
 
     def __next__(self):
 
-        length = self.utterance_duration * sample_rate
         is_same_speaker = bool(round(self.rng.uniform()))
 
         if is_same_speaker:
@@ -142,11 +148,11 @@ class DatasetSV(torch.utils.data.IterableDataset):
 
         # read utterances
         (_, s_1) = wavfile.read(sp_1.filepath)
-        s_1 = s_1[sp_1_offset:sp_1_offset+length]
+        s_1 = s_1[sp_1_offset:sp_1_offset+self.num_samples]
         s_1 = s_1 / (EPS + s_1.std())
 
         (_, s_2) = wavfile.read(sp_2.filepath)
-        s_2 = s_2[sp_2_offset:sp_2_offset+length]
+        s_2 = s_2[sp_2_offset:sp_2_offset+self.num_samples]
         s_2 = s_2 / (EPS + s_2.std())
 
         # read noises
@@ -157,11 +163,11 @@ class DatasetSV(torch.utils.data.IterableDataset):
         no_2_offset = self.rng.integers(0, no_2.max_offset)
 
         (_, n_1) = wavfile.read(no_1.filepath)
-        n_1 = n_1[no_1_offset:no_1_offset+length]
+        n_1 = n_1[no_1_offset:no_1_offset+self.num_samples]
         n_1 = n_1 / (EPS + n_1.std())
 
         (_, n_2) = wavfile.read(no_2.filepath)
-        n_2 = n_2[no_2_offset:no_2_offset+length]
+        n_2 = n_2[no_2_offset:no_2_offset+self.num_samples]
         n_2 = n_2 / (EPS + n_2.std())
 
         # mix the signals
@@ -188,8 +194,9 @@ class DatasetSE(torch.utils.data.IterableDataset):
             speaker_ids: List[str],
             speech_subset: str = 'train',
             noise_subset: str = 'train',
-            utterance_duration: Optional[int] = 3,
-            mixture_snr: Union[float, Tuple[float, float]] = (-5, 10)
+            mixture_snr: Union[float, Tuple[float, float]] = DEFAULT_MIXTURE_SNRS,
+            sample_rate: int = DEFAULT_SAMPLE_RATE,
+            utterance_duration: int = DEFAULT_UTTERANCE_DURATION,
     ):
         super().__init__()
         self.rng = np.random.default_rng(0)
@@ -203,7 +210,8 @@ class DatasetSE(torch.utils.data.IterableDataset):
         self.df_s = librispeech.query(f'speaker_id in {speaker_ids}'
         	).query(f'split == "{speech_subset}"')
         self.df_n = musan.query(f'split == "{noise_subset}"')
-        self.utterance_duration = utterance_duration
+
+        self.num_samples = int(sample_rate * utterance_duration)
 
     def __iter__(self):
         return self
@@ -214,18 +222,17 @@ class DatasetSE(torch.utils.data.IterableDataset):
         self.s_idx = (self.s_idx + 1) % len(self.df_s)
         self.n_idx = (self.n_idx + 1) % len(self.df_n)
 
-        length = self.utterance_duration * sample_rate
         offset_s = self.rng.integers(0, self.df_s.max_offset.iloc[self.s_idx])
         offset_n = self.rng.integers(0, self.df_n.max_offset.iloc[self.n_idx])
 
         # read speech file, offset and truncate, then normalize
         (_, s) = wavfile.read(self.df_s.filepath.iloc[self.s_idx])
-        s = s[offset_s:offset_s+length]
+        s = s[offset_s:offset_s+self.num_samples]
         s = s / s.std()
 
         # read noise file, offset and truncate, then normalize
         (_, n) = wavfile.read(self.df_n.filepath.iloc[self.n_idx])
-        n = n[offset_n:offset_n+length]
+        n = n[offset_n:offset_n+self.num_samples]
         n = n / n.std()
 
         # mix the signals
@@ -246,13 +253,9 @@ class DatasetSE(torch.utils.data.IterableDataset):
 librispeech = create_df_librispeech('/media/sdc1/librispeech_8khz/')
 musan = create_df_musan('/media/sdc1/musan_8khz/')
 
+speakers_tr = pd.read_csv('speakers/train.csv', dtype=_df_types)
 speakers_vl = pd.read_csv('speakers/validation.csv', dtype=_df_types)
 speakers_te = pd.read_csv('speakers/test.csv', dtype=_df_types)
-speakers_tr = pd.read_csv('speakers/train.csv', dtype=_df_types)
+speaker_ids_tr = sorted(speakers_tr.speaker_id)
 speaker_ids_vl = sorted(speakers_vl.speaker_id)
 speaker_ids_te = sorted(speakers_te.speaker_id)
-speaker_ids_tr = sorted(speakers_tr.speaker_id)
-# speaker_ids_tr = set(librispeech.speaker_id) - speaker_ids_vl - speaker_ids_te
-# speaker_ids_vl = sorted(speaker_ids_vl)
-# speaker_ids_te = sorted(speaker_ids_te)
-# speaker_ids_tr = sorted(speaker_ids_tr)
