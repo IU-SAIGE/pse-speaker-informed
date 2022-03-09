@@ -20,10 +20,24 @@ from asteroid.losses.sdr import SingleSrcNegSDR as LossSDR
 import _datasets as D
 import _models as M
 
+
 ROOT = os.path.dirname(os.path.realpath(__file__))
-DEFAULT_BATCH_SIZE = 128
+EARLY_STOPPING: int = 1000
+DEFAULT_BATCH_SIZE: int = 128
+
 
 def ray_train_specialist(config, use_ray: bool = True):
+
+    if config['specialist_index'] not in range(config['num_clusters']):
+        return dict(num_batches=None, vl_loss=None, vl_sisdr=None)
+
+    output_dir = None
+    if config['save_to_local']:
+        output_dir = os.path.join(
+            ROOT, 'weights', 'specialists',
+            'se-hs={:04d}_K={:02d}_k={:02d}'.format(
+            config['hidden_size'], config['num_clusters'], config['specialist_index']))
+        pathlib.Path(output_dir).mkdir(0o777, True, True)
 
     # find specialist mapping file
     mapping_filepath = os.path.join(
@@ -34,9 +48,7 @@ def ray_train_specialist(config, use_ray: bool = True):
         mapping = yaml.safe_load(fp)
 
     # grab a list of relevant speaker_ids
-    relevant_speakers = mapping['specialists'][config['specialist_index']]
-
-    print(config)
+    relevant_speakers = sorted(mapping['specialists'][config['specialist_index']])
 
     # fix seed
     seed_everything(0)
@@ -59,6 +71,7 @@ def ray_train_specialist(config, use_ray: bool = True):
     vx = vx.to(device)
     vs = vs.to(device)
 
+    print(config)
 
     # setup metrics + state dict
     (num_batches, current_epoch, best_epoch) = (0, 0, 0)
@@ -111,7 +124,7 @@ def ray_train_specialist(config, use_ray: bool = True):
         )
 
         # check for convergence
-        if current_epoch - best_epoch > 200:
+        if current_epoch - best_epoch > EARLY_STOPPING:
 
             torch.cuda.empty_cache()
 
@@ -122,8 +135,21 @@ def ray_train_specialist(config, use_ray: bool = True):
                     torch.save(best_state_dict, path)
                     path = os.path.join(checkpoint_dir, 'errors.json')
                     with open(path, 'w') as fp:
-                        json.dump(errors, fp)
+                        json.dump(errors, fp, indent=2)
             break
+
+    if output_dir:
+        print('Config: {}'.format(config))
+        print('Final Validation Loss: {}'.format(best_result))
+        torch.save(best_state_dict, os.path.join(output_dir, 'checkpoint'))
+        path = os.path.join(output_dir, 'config.json')
+        with open(path, 'w') as fp:
+            json.dump(config, fp, indent=2)
+        path = os.path.join(output_dir, 'errors.json')
+        with open(path, 'w') as fp:
+            json.dump(errors, fp, indent=2)
+        print('Model path: {}'.format(os.path.join(output_dir, 'checkpoint')))
+
 
     print('exited train_specialist with args = {{' + \
         ', '.join([f'{k}={v}' for (k,v) in config.items()]) + '}}')
@@ -135,10 +161,10 @@ def ray_train_specialist(config, use_ray: bool = True):
     }
 
 
-def main(num_gpus: float = .33, num_samples: int = 12):
+def main_old(num_gpus: float = .33, num_samples: int = 12):
 
     # sweep hyperparameter space
-    for hidden_size in [64, 128, 256]:
+    for hidden_size in [384, 512, 640, 768, 896, 1024, 1152, 1280]:
         for num_clusters in [2, 5, 10]:
             for specialist_index in range(num_clusters):
 
@@ -196,6 +222,36 @@ def main(num_gpus: float = .33, num_samples: int = 12):
                 f_dest = os.path.join(output_dir, 'config.json')
                 with open(f_dest, 'w') as fp:
                     json.dump(best_trial.config, fp, indent=2)
+
+
+def main(num_gpus: float = .33):
+
+    config = {
+        'save_to_local': True,
+        'hidden_size': tune.grid_search([1152, 1280]),
+        'num_layers': 2,
+        'mixing_snr': (-5, 10),
+        'num_clusters': tune.grid_search([2, 5, 10]),
+        'specialist_index': tune.grid_search(list(range(10))[::-1]),
+        'learning_rate': 1e-3,
+    }
+    tune.run(
+        ray_train_specialist,
+        config=config,
+        keep_checkpoints_num=1,
+        progress_reporter=CLIReporter(
+            max_report_frequency=60,
+            metric_columns=[
+                'num_batches', 'vl_sisdr'
+            ],
+            parameter_columns=[
+                'num_clusters', 'specialist_index',
+                'hidden_size', 'learning_rate'
+            ],
+        ),
+        resources_per_trial={'gpu': num_gpus},
+        verbose=1
+    )
 
 if __name__ == '__main__':
     main()

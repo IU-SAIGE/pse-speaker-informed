@@ -1,6 +1,7 @@
 import os
 import pathlib
 import json
+import yaml
 from typing import Optional, Sequence, Tuple, Union, List
 
 import numpy as np
@@ -21,7 +22,7 @@ _df_types = dict(
 )
 
 EPS = 1e-8
-
+ROOT = os.path.dirname(os.path.realpath(__file__))
 DEFAULT_UTTERANCE_DURATION: int = 5  # seconds
 DEFAULT_MIXTURE_SNRS: Union[float, Tuple[float, float]] = (-5, 10) # dB
 DEFAULT_SAMPLE_RATE: int = 8000  # Hz
@@ -29,7 +30,7 @@ DEFAULT_SAMPLE_RATE: int = 8000  # Hz
 
 def create_df_librispeech(
     root_directory: str,
-    csv_path: str = 'corpora/librispeech.csv',
+    csv_path: str = os.path.join(ROOT, 'corpora', 'librispeech.csv'),
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     max_duration: int = DEFAULT_UTTERANCE_DURATION,
 ):
@@ -54,13 +55,14 @@ def create_df_librispeech(
         + df.chapter_id + '/' + df.speaker_id + '-' + df.chapter_id
         + '-' + df.utterance_id + '.wav'
     )
+    df = df.sample(frac=1, random_state=0)
     assert all(df.filepath.apply(os.path.isfile))
     return df
 
 
 def create_df_musan(
     root_directory: str,
-    csv_path: str = 'corpora/musan.csv',
+    csv_path: str = os.path.join(ROOT, 'corpora', 'musan.csv'),
     sample_rate: int = DEFAULT_SAMPLE_RATE,
     max_duration: int = DEFAULT_UTTERANCE_DURATION,
 ):
@@ -250,12 +252,83 @@ class DatasetSE(torch.utils.data.IterableDataset):
         return sample
 
 
+class DatasetClassification(torch.utils.data.IterableDataset):
+
+    def __init__(
+            self,
+            speaker_ids: List[str],
+            mapping_filepath: str,
+            speech_subset: str = 'train',
+            noise_subset: str = 'train',
+            mixture_snr: Union[float, Tuple[float, float]] = DEFAULT_MIXTURE_SNRS,
+            sample_rate: int = DEFAULT_SAMPLE_RATE,
+            utterance_duration: int = DEFAULT_UTTERANCE_DURATION,
+    ):
+        super().__init__()
+        self.rng = np.random.default_rng(0)
+        (self.s_idx, self.n_idx) = (-1, -1)
+        self.speaker_ids = speaker_ids
+        if isinstance(mixture_snr, Tuple):
+            self.mixture_snr_min = min(mixture_snr)
+            self.mixture_snr_max = max(mixture_snr)
+        else:
+            self.mixture_snr_min = self.mixture_snr_max = mixture_snr
+        self.df_s = librispeech.query(f'speaker_id in {speaker_ids}'
+            ).query(f'split == "{speech_subset}"')
+        self.df_n = musan.query(f'split == "{noise_subset}"')
+
+        self.num_samples = int(sample_rate * utterance_duration)
+        with open(mapping_filepath, 'r') as fp:
+            self.mapping = yaml.safe_load(fp)
+        self.num_clusters = len(list(self.mapping['specialists'].keys()))
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+
+        # increment pointers
+        self.s_idx = (self.s_idx + 1) % len(self.df_s)
+        self.n_idx = (self.n_idx + 1) % len(self.df_n)
+
+        offset_s = self.rng.integers(0, self.df_s.max_offset.iloc[self.s_idx])
+        offset_n = self.rng.integers(0, self.df_n.max_offset.iloc[self.n_idx])
+
+        # read speech file, offset and truncate, then normalize
+        (_, s) = wavfile.read(self.df_s.filepath.iloc[self.s_idx])
+        s = s[offset_s:offset_s+self.num_samples]
+        s = s / s.std()
+
+        # read noise file, offset and truncate, then normalize
+        (_, n) = wavfile.read(self.df_n.filepath.iloc[self.n_idx])
+        n = n[offset_n:offset_n+self.num_samples]
+        n = n / n.std()
+
+        # mix the signals
+        snr = self.rng.uniform(self.mixture_snr_min, self.mixture_snr_max)
+        x = s + (n * 10**(-snr/20.))
+
+        # generate the one-hot vector based on which cluster the speaker is in
+        y = torch.zeros(self.num_clusters)
+        speaker_id = self.df_s.speaker_id.iloc[self.s_idx]
+        y[self.mapping['speakers'][speaker_id]] = 1.
+
+        # create output tuple
+        scale_factor = abs(x).max()
+        sample = (
+            torch.Tensor(x) / scale_factor,
+            y
+        )
+
+        return sample
+
+
 librispeech = create_df_librispeech('/media/sdc1/librispeech_8khz/')
 musan = create_df_musan('/media/sdc1/musan_8khz/')
 
-speakers_tr = pd.read_csv('speakers/train.csv', dtype=_df_types)
-speakers_vl = pd.read_csv('speakers/validation.csv', dtype=_df_types)
-speakers_te = pd.read_csv('speakers/test.csv', dtype=_df_types)
+speakers_tr = pd.read_csv(os.path.join(ROOT, 'speakers', 'train.csv'), dtype=_df_types)
+speakers_vl = pd.read_csv(os.path.join(ROOT, 'speakers', 'validation.csv'), dtype=_df_types)
+speakers_te = pd.read_csv(os.path.join(ROOT, 'speakers', 'test.csv'), dtype=_df_types)
 speaker_ids_tr = sorted(speakers_tr.speaker_id)
 speaker_ids_vl = sorted(speakers_vl.speaker_id)
 speaker_ids_te = sorted(speakers_te.speaker_id)

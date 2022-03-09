@@ -18,8 +18,11 @@ from asteroid.losses.sdr import SingleSrcNegSDR as LossSDR
 import _datasets as D
 import _models as M
 
+
 ROOT = os.path.dirname(os.path.realpath(__file__))
-EPS = 1e-8
+EARLY_STOPPING: int = 1000
+DEFAULT_BATCH_SIZE: int = 128
+
 
 def ray_train_generalist(config, use_ray: bool = True):
 
@@ -103,7 +106,7 @@ def ray_train_generalist(config, use_ray: bool = True):
         tune.report(num_batches=num_batches, vl_loss=best_result, vl_sisdr=best_sisdr)
 
         # check for convergence
-        if current_epoch - best_epoch > 200:
+        if current_epoch - best_epoch > EARLY_STOPPING:
 
             torch.cuda.empty_cache()
 
@@ -164,14 +167,15 @@ def ray_train_generalist(config, use_ray: bool = True):
     }
 
 
-def find_learning_rates(num_gpus: float = .33):
-    for hidden_size in [1280,1152,1024,896,768,640]:
+def find_learning_rates(num_gpus: float = .2, num_samples: int = 10):
+    for hidden_size in [64]:
         config = {
             'mixing_snr': (-5, 10),
             'utterance_duration': 5,
             'num_layers': 2,
             'hidden_size': hidden_size,
-            'learning_rate': tune.qloguniform(1e-2,1e-5,1e-6), # tune.grid_search([1e-2, 1e-3, 1e-4]),
+            'learning_rate': tune.grid_search(
+                        list(np.logspace(-4, -2, num_samples))),
             'batch_size': 128,
         }
         # scheduler = ASHAScheduler(
@@ -190,7 +194,7 @@ def find_learning_rates(num_gpus: float = .33):
                 metric_columns=['num_batches', 'vl_sisdr', 'te_sisdr'],
                 parameter_columns=['hidden_size', 'learning_rate'],
             ),
-            num_samples=20,
+            scheduler=scheduler,
             resources_per_trial={'gpu': num_gpus},
             verbose=1
         )
